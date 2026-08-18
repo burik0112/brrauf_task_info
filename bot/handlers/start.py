@@ -34,9 +34,10 @@ async def cmd_start(message: Message, state: FSMContext):
             await state.clear()
         else:
             await message.answer(
-                "Xush kelibsiz! Ro'yxatdan o'tish uchun ismingizni kiriting:",
+                "Xush kelibsiz! Ro'yxatdan o'tish uchun Bitrix ID kiriting:\n\n"
+                "Bitrix ID ni https://brrauf.bitrix24.uz dan olishingiz mumkin.",
             )
-            await state.set_state(RegistrationState.waiting_for_name)
+            await state.set_state(RegistrationState.waiting_for_bitrix_id)
     except Exception as e:
         logger.exception('Error in /start handler')
         await message.answer("Xatolik yuz berdi. Qaytadan urinib ko'ring.")

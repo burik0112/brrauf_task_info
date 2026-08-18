@@ -6,9 +6,9 @@ from .models import TelegramUser
 class TelegramUserAdmin(admin.ModelAdmin):
     list_display = [
         'telegram_id', 'username', 'first_name', 'last_name',
-        'phone_number', 'is_registered', 'created_at',
+        'phone_number', 'bitrix_id', 'is_registered', 'created_at',
     ]
-    search_fields = ['telegram_id', 'username', 'first_name', 'last_name', 'phone_number']
+    search_fields = ['telegram_id', 'username', 'first_name', 'last_name', 'phone_number', 'bitrix_id']
     list_filter = ['is_registered', 'created_at']
     ordering = ['-created_at']
     readonly_fields = ['created_at', 'updated_at']

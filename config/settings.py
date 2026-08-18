@@ -74,3 +74,5 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+BITRIX_WEBHOOK_URL = os.getenv('BITRIX_WEBHOOK_URL', '')

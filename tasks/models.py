@@ -11,6 +11,9 @@ class Task(models.Model):
     class Source(models.TextChoices):
         TEXT = 'text', 'Text'
         VOICE = 'voice', 'Voice'
+        VIDEO = 'video', 'Video'
+        PHOTO = 'photo', 'Photo'
+        VIDEO_NOTE = 'video_note', 'Video Note'
 
     telegram_user = models.ForeignKey(
         TelegramUser,
@@ -18,6 +21,9 @@ class Task(models.Model):
         related_name='tasks',
     )
     title = models.CharField(max_length=500)
+    responsible_bitrix_id = models.IntegerField(null=True, blank=True, verbose_name='Responsible Bitrix ID')
+    responsible_name = models.CharField(max_length=255, null=True, blank=True, verbose_name='Responsible Name')
+    bitrix_task_id = models.IntegerField(null=True, blank=True, verbose_name='Bitrix Task ID')
     status = models.CharField(
         max_length=10,
         choices=Status.choices,
