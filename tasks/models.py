@@ -24,6 +24,9 @@ class Task(models.Model):
     responsible_bitrix_id = models.IntegerField(null=True, blank=True, verbose_name='Responsible Bitrix ID')
     responsible_name = models.CharField(max_length=255, null=True, blank=True, verbose_name='Responsible Name')
     bitrix_task_id = models.IntegerField(null=True, blank=True, verbose_name='Bitrix Task ID')
+    bitrix_synced = models.BooleanField(default=False, verbose_name='Bitrix Synced')
+    bitrix_error = models.CharField(max_length=500, blank=True, default='', verbose_name='Bitrix Error')
+    telegram_file_id = models.TextField(blank=True, default='', verbose_name='Telegram File ID')
     status = models.CharField(
         max_length=10,
         choices=Status.choices,
@@ -34,7 +37,7 @@ class Task(models.Model):
         choices=Source.choices,
         default=Source.TEXT,
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

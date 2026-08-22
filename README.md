@@ -1,13 +1,14 @@
 # Telegram Task Management Bot
 
 Django + Aiogram 3.x asosida yaratilgan Telegram vazifalar boshqarish boti.
+Bitrix24 bilan integratsiyalangan — vazifalar to'g'ridan-to'g'ri Bitrix24 ga yuboriladi.
 
 ## Loyiha tuzilmasi
 
 ```
-├── config/          # Django settings, urls, wsgi, asgi
+├── config/          # Django settings, urls
 ├── users/           # TelegramUser modeli
-├── tasks/           # Task modeli va services
+├── tasks/           # Task modeli va BitrixService
 ├── bot/             # Telegram bot (Aiogram 3.x)
 │   ├── handlers/    # Bot handlerlari
 │   ├── keyboards/   # Keyboardlar
@@ -17,6 +18,13 @@ Django + Aiogram 3.x asosida yaratilgan Telegram vazifalar boshqarish boti.
 ├── .env
 └── .env.example
 ```
+
+## Talablar
+
+- Python 3.10+
+- PostgreSQL yoki SQLite (ishlab chiqish uchun)
+- Redis (ixtiyoriy — doimiy FSM state uchun)
+- Bitrix24 webhook URL
 
 ## O'rnatish
 
@@ -37,15 +45,19 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-4. TELEGRAM_BOT_TOKEN ni .env ga qo'shing.
+4. .env faylini to'ldiring:
+```
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+DJANGO_SECRET_KEY=your-secret-key
+BITRIX_WEBHOOK_URL=https://your-portal.bitrix24.uz/rest/1/your-token/
+```
 
 5. Migratsiyalarni bajaring:
 ```bash
-python manage.py makemigrations
 python manage.py migrate
 ```
 
-6. Admin foydalanuvchi yarating:
+6. Admin foydalanuvchi yarating (ixtiyoriy):
 ```bash
 python manage.py createsuperuser
 ```
@@ -64,13 +76,31 @@ python -m bot
 
 ## Xususiyatlar
 
-- /start - Ro'yxatdan o'tish
-- Vazifa yaratish (matn)
-- Vazifalarni ko'rish (barcha, kutilayotgan, bajarilgan)
-- Vazifa bajarildi
-- Profil
-- Yordam
+- `/start` — Ro'yxatdan o'tish (Bitrix ID + telefon raqam orqali)
+- `/cancel` — Joriy amalni bekor qilish
+- `/help` — Yordam
+- Vazifa yaratish — matn, ovozli xabar, rasm, video
+- Mas'ul tanlash — Bitrix24 foydalanuvchilari orqali
+- Bitrix24 ga yuborish — avtomatik ravishda vazifa yaratiladi
 
 ## Bitrix24 integratsiya
 
-Hozircha Bitrix24 integratsiyasi yo'q. Kelajakda `tasks/services.py` faylida `BitrixService` klassiga qo'shiladi.
+`tasks/services.py` faylida `BitrixService` klassi orqali:
+
+- `get_user()` — Bitrix24 foydalanuvchisini olish
+- `create_task()` — Bitrix24 da vazifa yaratish
+- `get_all_users()` — Barcha foydalanuvchilarni olish (kesh bilan)
+- `search_users()` — Foydalanuvchilarni qidirish
+- `attach_file_to_task()` — Faylni vazifaga biriktirish
+
+## Testlar
+
+```bash
+python manage.py test
+```
+
+## Health check
+
+```bash
+curl http://localhost:8000/health/
+```

@@ -7,7 +7,7 @@ class TelegramUser(models.Model):
     first_name = models.CharField(max_length=255, blank=True, null=True, verbose_name='First Name')
     last_name = models.CharField(max_length=255, blank=True, null=True, verbose_name='Last Name')
     phone_number = models.CharField(max_length=20, blank=True, null=True, verbose_name='Phone Number')
-    bitrix_id = models.IntegerField(null=True, blank=True, verbose_name='Bitrix ID')
+    bitrix_id = models.IntegerField(null=True, blank=True, unique=True, verbose_name='Bitrix ID')
     bitrix_first_name = models.CharField(max_length=255, blank=True, null=True, verbose_name='Bitrix First Name')
     bitrix_last_name = models.CharField(max_length=255, blank=True, null=True, verbose_name='Bitrix Last Name')
     is_registered = models.BooleanField(default=False, verbose_name='Registered')
