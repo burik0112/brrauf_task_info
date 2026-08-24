@@ -1,14 +1,16 @@
-from aiogram import Router, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.context import FSMContext
-from asgiref.sync import sync_to_async
 import html
 import logging
+import re
 
-from users.models import TelegramUser
-from tasks.services import bitrix_service
-from bot.states.registration import RegistrationState
+from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from asgiref.sync import sync_to_async
+
 from bot.keyboards.main_menu import get_main_menu
+from bot.states.registration import RegistrationState
+from tasks.services import bitrix_service
+from users.models import TelegramUser
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -48,6 +50,8 @@ async def process_bitrix_id(message: Message, state: FSMContext):
 
         full_name = user_data['full_name']
         bitrix_phone = user_data.get('personal_phone', '') or user_data.get('personal_mobile', '')
+        if not bitrix_phone:
+            bitrix_phone = ''
 
         await state.update_data(
             bitrix_id=bitrix_id,
@@ -103,17 +107,56 @@ async def process_phone(message: Message, state: FSMContext):
         bitrix_phone = data.get('bitrix_phone', '')
         full_name = f"{bitrix_first_name} {bitrix_last_name}".strip()
 
-        if bitrix_phone:
-            normalized_bitrix = bitrix_phone.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
-            normalized_contact = phone_number.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
-            if not (normalized_bitrix.endswith(normalized_contact[-7:]) or normalized_contact.endswith(normalized_bitrix[-7:])):
-                await message.answer(
-                    f"❌ Ulashgan raqamingiz Bitrix24 dagi raqamingizga mos kelmaydi.\n\n"
-                    f"Bitrix24 dagi raqamingiz: <code>{html.escape(bitrix_phone)}</code>\n\n"
-                    "Iltimos, to'g'ri raqamni ulang yoki /start ni bosing.",
-                    parse_mode='HTML',
-                )
-                return
+        if not bitrix_phone:
+            logger.warning(
+                'Phone verification skipped: bitrix phone is empty',
+                extra={'telegram_id': message.from_user.id, 'bitrix_id': bitrix_id},
+            )
+            await message.answer(
+                "❌ Bitrix24 profilingizda telefon raqami ko'rsatilmagan.\n\n"
+                "Administratorga murojaat qiling yoki /start ni bosing.",
+            )
+            return
+
+        def extract_digits(phone: str) -> str:
+            return re.sub(r'\D', '', phone)
+
+        bitrix_digits = extract_digits(bitrix_phone)
+        contact_digits = extract_digits(phone_number)
+
+        if not bitrix_digits or not contact_digits:
+            logger.warning(
+                'Phone verification failed: empty digits after normalization',
+                extra={'telegram_id': message.from_user.id, 'bitrix_id': bitrix_id},
+            )
+            await message.answer(
+                f"❌ Ulashgan raqamingiz Bitrix24 dagi raqamingizga mos kelmaydi.\n\n"
+                f"Bitrix24 dagi raqamingiz: <code>{html.escape(bitrix_phone)}</code>\n\n"
+                "Iltimos, to'g'ri raqamni ulang yoki /start ni bosing.",
+                parse_mode='HTML',
+            )
+            return
+
+        bitrix_last9 = bitrix_digits[-9:]
+        contact_last9 = contact_digits[-9:]
+
+        if bitrix_last9 != contact_last9:
+            logger.warning(
+                'Phone verification failed: last 9 digits do not match',
+                extra={
+                    'telegram_id': message.from_user.id,
+                    'bitrix_id': bitrix_id,
+                    'bitrix_last9': bitrix_last9,
+                    'contact_last9': contact_last9,
+                },
+            )
+            await message.answer(
+                f"❌ Ulashgan raqamingiz Bitrix24 dagi raqamingizga mos kelmaydi.\n\n"
+                f"Bitrix24 dagi raqamingiz: <code>{html.escape(bitrix_phone)}</code>\n\n"
+                "Iltimos, to'g'ri raqamni ulang yoki /start ni bosing.",
+                parse_mode='HTML',
+            )
+            return
 
         user = await sync_to_async(TelegramUser.objects.get)(
             telegram_id=message.from_user.id

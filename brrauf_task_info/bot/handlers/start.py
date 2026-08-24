@@ -1,13 +1,14 @@
-from aiogram import Router, F
-from aiogram.types import Message
-from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from asgiref.sync import sync_to_async
 import logging
 
-from users.models import TelegramUser
-from bot.states.registration import RegistrationState
+from aiogram import Router
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message
+from asgiref.sync import sync_to_async
+
 from bot.keyboards.main_menu import get_main_menu
+from bot.states.registration import RegistrationState
+from users.models import TelegramUser
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     try:
-        user, created = await sync_to_async(TelegramUser.objects.get_or_create)(
+        user, _created = await sync_to_async(TelegramUser.objects.get_or_create)(
             telegram_id=message.from_user.id,
             defaults={
                 'username': message.from_user.username,
@@ -38,6 +39,6 @@ async def cmd_start(message: Message, state: FSMContext):
                 "Bitrix ID ni https://brrauf.bitrix24.uz dan olishingiz mumkin.",
             )
             await state.set_state(RegistrationState.waiting_for_bitrix_id)
-    except Exception as e:
+    except Exception:
         logger.exception('Error in /start handler')
         await message.answer("Xatolik yuz berdi. Qaytadan urinib ko'ring.")

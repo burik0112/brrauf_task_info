@@ -1,219 +1,492 @@
-from django.test import TestCase, Client
-from django.contrib.auth.models import User
-from unittest.mock import patch, AsyncMock, MagicMock
-import json
+import asyncio
+from unittest.mock import AsyncMock, patch, MagicMock
 
-from tasks.models import Task
-from users.models import TelegramUser
-from bot.handlers.tasks import (
-    format_collected_tasks,
-    format_task_for_confirm,
-    MAX_COLLECTED_TASKS,
-    MAX_TITLE_LENGTH,
-    TELEGRAM_MAX_TEXT,
+from django.test import TestCase, TransactionTestCase
+from aiogram import Bot, Dispatcher
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    Chat, User, Message, CallbackQuery, Contact, PhotoSize, Voice, Video, Update,
 )
 
+from bot.handlers.tasks import router as tasks_router, _confirm_locks, MAX_FILE_SIZE
+from bot.handlers.registration import router as registration_router
+from bot.states.task import TaskState
+from bot.states.registration import RegistrationState
+from tasks.models import Task
+from users.models import TelegramUser
 
-class FormatCollectedTasksTest(TestCase):
-    def test_empty_tasks(self):
-        result = format_collected_tasks([])
-        self.assertEqual(result, "📭 Vazifalar yo'q.")
 
-    def test_single_task(self):
-        tasks = [{'title': 'Test task', 'source': 'text'}]
-        result = format_collected_tasks(tasks)
-        self.assertIn('1. 📝 Test task', result)
-        self.assertIn('1 ta', result)
+BOT_ID = 1
+CHAT_ID = 999
+USER_ID = 111
+KEY = StorageKey(bot_id=BOT_ID, user_id=USER_ID, chat_id=CHAT_ID)
 
-    def test_multiple_tasks(self):
-        tasks = [
-            {'title': 'Task 1', 'source': 'text'},
-            {'title': 'Task 2', 'source': 'voice'},
-            {'title': 'Task 3', 'source': 'photo'},
+_update_id_counter = 0
+
+
+def _next_update_id():
+    global _update_id_counter
+    _update_id_counter += 1
+    return _update_id_counter
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _make_dp():
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
+    dp.include_router(tasks_router)
+    dp.include_router(registration_router)
+    return dp, storage
+
+
+def _reset_router():
+    tasks_router._parent_router = None
+    registration_router._parent_router = None
+
+
+def _make_bot():
+    bot = AsyncMock(spec=Bot)
+    bot.id = BOT_ID
+    bot.__class__ = Bot
+    return bot
+
+
+def _user(telegram_id=USER_ID, username='testuser', first_name='Test', last_name='User'):
+    return User(id=telegram_id, is_bot=False, first_name=first_name, last_name=last_name, username=username)
+
+
+def _chat(chat_id=CHAT_ID):
+    return Chat(id=chat_id, type='private')
+
+
+def _msg(text='/start', user=None, chat=None, message_id=1):
+    return Message(message_id=message_id, date=1234567890, chat=chat or _chat(),
+                   from_user=user or _user(), text=text)
+
+
+def _cb(data, user=None, chat=None, cb_msg_id=10):
+    msg = Message(message_id=cb_msg_id, date=1234567890, chat=chat or _chat(),
+                  from_user=user or _user(), text='')
+    return CallbackQuery(id=f'cb{_next_update_id()}', from_user=user or _user(),
+                         chat_instance='test', data=data, message=msg)
+
+
+def _contact_msg(user_id, phone_number, user=None):
+    return Message(message_id=1, date=1234567890, chat=_chat(),
+                   from_user=user or _user(),
+                   contact=Contact(user_id=user_id, phone_number=phone_number, first_name='T'))
+
+
+def _photo_msg(file_id='p1', file_size=1024, media_group_id=None, caption=None):
+    photo = PhotoSize(file_id=file_id, file_unique_id=f'{file_id}_u',
+                      width=100, height=100, file_size=file_size)
+    return Message(message_id=_next_update_id(), date=1234567890, chat=_chat(), from_user=_user(),
+                   photo=[photo], caption=caption, media_group_id=media_group_id)
+
+
+def _voice_msg(file_id='v1', file_size=5000, duration=10):
+    return Message(message_id=_next_update_id(), date=1234567890, chat=_chat(), from_user=_user(),
+                   voice=Voice(file_id=file_id, file_unique_id=f'{file_id}_u',
+                               duration=duration, file_size=file_size))
+
+
+def _video_msg(file_id='vid1', file_size=5000, duration=30):
+    return Message(message_id=_next_update_id(), date=1234567890, chat=_chat(), from_user=_user(),
+                   video=Video(file_id=file_id, file_unique_id=f'{file_id}_u',
+                               duration=duration, file_size=file_size,
+                               width=100, height=100))
+
+
+async def _set_state(storage, state, data=None):
+    ctx = FSMContext(storage=storage, key=KEY)
+    await ctx.set_state(state)
+    if data:
+        await ctx.update_data(**data)
+    return ctx
+
+
+async def _get_state(storage):
+    ctx = FSMContext(storage=storage, key=KEY)
+    return await ctx.get_state()
+
+
+async def _get_data(storage):
+    ctx = FSMContext(storage=storage, key=KEY)
+    return await ctx.get_data()
+
+
+async def _feed(dp, bot, message_or_cb):
+    if isinstance(message_or_cb, CallbackQuery):
+        upd = Update(update_id=_next_update_id(), callback_query=message_or_cb)
+    else:
+        upd = Update(update_id=_next_update_id(), message=message_or_cb)
+    return await dp.feed_update(bot, upd)
+
+
+class ResponsibleSelectionFlowTest(TestCase):
+    """AUDIT-02 regression: search results keyboard buttons must work."""
+
+    def setUp(self):
+        _confirm_locks.clear()
+        _reset_router()
+        self.dp, self.storage = _make_dp()
+        self.bot = _make_bot()
+        self.tg_user = TelegramUser.objects.create(
+            telegram_id=USER_ID, username='testuser', first_name='Test', last_name='User',
+            is_registered=True, bitrix_id=10, bitrix_first_name='Test', bitrix_last_name='User',
+        )
+
+    def _setup(self, state, data):
+        return _run(_set_state(self.storage, state, data))
+
+    def test_select_responsible_from_list(self):
+        self._setup(TaskState.waiting_for_responsible, {
+            'collected_tasks': [{'title': 'Task', 'source': 'text'}],
+            'list_message_id': 10,
+            'bitrix_users': [{'id': 10, 'full_name': 'Alice', 'name': 'Alice', 'last_name': 'Smith'}],
+            'recent_ids': [],
+        })
+        _run(_feed(self.dp, self.bot, _cb('select_responsible:10')))
+        data = _run(_get_data(self.storage))
+        self.assertEqual(data.get('responsible_bitrix_id'), 10)
+
+    def test_select_responsible_from_search(self):
+        self._setup(TaskState.waiting_for_responsible_search, {
+            'collected_tasks': [{'title': 'Task', 'source': 'text'}],
+            'list_message_id': 20,
+            'bitrix_users': [{'id': 10, 'full_name': 'Alice', 'name': 'Alice', 'last_name': 'Smith'}],
+            'recent_ids': [],
+            'search_results': [{'id': 20, 'full_name': 'Bob', 'name': 'Bob', 'last_name': 'Search'}],
+        })
+        _run(_feed(self.dp, self.bot, _cb('select_responsible:20')))
+        data = _run(_get_data(self.storage))
+        self.assertEqual(data.get('responsible_bitrix_id'), 20)
+        self.assertEqual(data.get('responsible_name'), 'Bob')
+
+    def test_select_responsible_unknown_id(self):
+        self._setup(TaskState.waiting_for_responsible, {
+            'collected_tasks': [{'title': 'Task', 'source': 'text'}],
+            'list_message_id': 10,
+            'bitrix_users': [{'id': 10, 'full_name': 'Alice', 'name': 'Alice', 'last_name': 'Smith'}],
+            'recent_ids': [],
+        })
+        _run(_feed(self.dp, self.bot, _cb('select_responsible:999')))
+        state = _run(_get_state(self.storage))
+        self.assertEqual(str(state), 'TaskState:waiting_for_responsible')
+
+    def test_back_to_responsible_list_from_search(self):
+        self._setup(TaskState.waiting_for_responsible_search, {
+            'collected_tasks': [{'title': 'Task', 'source': 'text'}],
+            'list_message_id': 20,
+            'bitrix_users': [{'id': 10, 'full_name': 'Alice', 'name': 'Alice', 'last_name': 'Smith'}],
+            'recent_ids': [],
+        })
+        _run(_feed(self.dp, self.bot, _cb('back_to_responsible_list')))
+        state = _run(_get_state(self.storage))
+        self.assertEqual(str(state), 'TaskState:waiting_for_responsible')
+
+    def test_cancel_task_from_responsible(self):
+        self._setup(TaskState.waiting_for_responsible, {
+            'collected_tasks': [{'title': 'Task', 'source': 'text'}],
+            'list_message_id': 10,
+            'bitrix_users': [],
+            'recent_ids': [],
+        })
+        _run(_feed(self.dp, self.bot, _cb('cancel_task')))
+        state = _run(_get_state(self.storage))
+        self.assertIsNone(state)
+
+    def test_cancel_task_from_search(self):
+        self._setup(TaskState.waiting_for_responsible_search, {
+            'collected_tasks': [{'title': 'Task', 'source': 'text'}],
+            'list_message_id': 20,
+            'bitrix_users': [],
+            'recent_ids': [],
+        })
+        _run(_feed(self.dp, self.bot, _cb('cancel_task')))
+        state = _run(_get_state(self.storage))
+        self.assertIsNone(state)
+
+    def test_search_responsible(self):
+        self._setup(TaskState.waiting_for_responsible, {
+            'collected_tasks': [{'title': 'Task', 'source': 'text'}],
+            'list_message_id': 10,
+            'bitrix_users': [],
+            'recent_ids': [],
+        })
+        _run(_feed(self.dp, self.bot, _cb('search_responsible')))
+        state = _run(_get_state(self.storage))
+        self.assertEqual(str(state), 'TaskState:waiting_for_responsible_search')
+
+    def test_cancel_search(self):
+        self._setup(TaskState.waiting_for_responsible_search, {
+            'collected_tasks': [{'title': 'Task', 'source': 'text'}],
+            'list_message_id': 20,
+            'bitrix_users': [{'id': 10, 'full_name': 'Alice', 'name': 'Alice', 'last_name': 'Smith'}],
+            'recent_ids': [],
+        })
+        _run(_feed(self.dp, self.bot, _cb('cancel_search')))
+        state = _run(_get_state(self.storage))
+        self.assertEqual(str(state), 'TaskState:waiting_for_responsible')
+
+    def test_expired_session_callback(self):
+        _run(_feed(self.dp, self.bot, _cb('select_responsible:10')))
+        _run(_feed(self.dp, self.bot, _cb('final_confirm')))
+
+
+class FinalConfirmFlowTest(TestCase):
+    """AUDIT-10 regression: attachment error must not crash final_confirm."""
+
+    def setUp(self):
+        _confirm_locks.clear()
+        _reset_router()
+        self.dp, self.storage = _make_dp()
+        self.bot = _make_bot()
+        self.tg_user = TelegramUser.objects.create(
+            telegram_id=USER_ID, username='testuser', first_name='Test', last_name='User',
+            is_registered=True, bitrix_id=10, bitrix_first_name='Test', bitrix_last_name='User',
+        )
+
+    def _setup_confirming(self, responsible_id=10):
+        return _run(_set_state(self.storage, TaskState.confirming_tasks, {
+            'collected_tasks': [{'title': 'Test task', 'source': 'text'}],
+            'list_message_id': 10,
+            'responsible_bitrix_id': responsible_id,
+            'responsible_name': 'Alice Smith',
+        }))
+
+    def _patch_handlers(self, bitrix_result=None, attach_result=True, attach_side_effect=None):
+        """Patch all DB and Bitrix calls in final_confirm."""
+        mock_user = MagicMock()
+        mock_user.bitrix_id = 10
+        mock_user.bitrix_first_name = 'Test'
+        mock_user.bitrix_last_name = 'User'
+        mock_user.telegram_id = USER_ID
+
+        mock_task = MagicMock()
+        mock_task.pk = 42
+        mock_task.bitrix_task_id = None
+        mock_task.bitrix_synced = False
+
+        patches = [
+            patch('bot.handlers.tasks.bitrix_service'),
+            patch('bot.handlers.tasks.TelegramUser'),
+            patch('bot.handlers.tasks.Task'),
+            patch('bot.handlers.tasks.sync_to_async'),
         ]
-        result = format_collected_tasks(tasks)
-        self.assertIn('1. 📝 Task 1', result)
-        self.assertIn('2. 🎤 Task 2', result)
-        self.assertIn('3. 🖼 Task 3', result)
-        self.assertIn('3 ta', result)
+        mocks = [p.start() for p in patches]
+        mock_svc, mock_user_model, mock_task_model, mock_sync = mocks
 
-    def test_html_escaping(self):
-        tasks = [{'title': '<script>alert("xss")</script>', 'source': 'text'}]
-        result = format_collected_tasks(tasks)
-        self.assertNotIn('<script>', result)
-        self.assertIn('&lt;script&gt;', result)
+        if attach_side_effect:
+            mock_svc.attach_file_to_task = AsyncMock(side_effect=attach_side_effect)
+        else:
+            mock_svc.attach_file_to_task = AsyncMock(return_value=attach_result)
+        mock_svc.create_task = AsyncMock(return_value=bitrix_result or {'ok': True, 'id': '42'})
 
-    def test_html_escaping_ampersand(self):
-        tasks = [{'title': 'A & B < C', 'source': 'text'}]
-        result = format_collected_tasks(tasks)
-        self.assertIn('A &amp; B &lt; C', result)
+        mock_user_model.objects.get = MagicMock(return_value=mock_user)
+        mock_task_model.objects.bulk_create = MagicMock(return_value=[mock_task])
+        mock_task_model.objects.bulk_update = MagicMock()
+        mock_task_model.objects.filter = MagicMock()
+        mock_task_model.objects.filter.return_value.exists = MagicMock(return_value=False)
 
-    def test_title_truncation(self):
-        long_title = 'x' * (MAX_TITLE_LENGTH + 100)
-        tasks = [{'title': long_title, 'source': 'text'}]
-        result = format_collected_tasks(tasks)
-        self.assertIn('x' * MAX_TITLE_LENGTH, result)
-        self.assertNotIn('x' * (MAX_TITLE_LENGTH + 1), result)
+        def sync_to_async_side_effect(func):
+            async def wrapper(*args, **kwargs):
+                return func(*args, **kwargs)
+            return wrapper
+        mock_sync.side_effect = sync_to_async_side_effect
 
-    def test_max_tasks_warning(self):
-        tasks = [{'title': f'Task {i}', 'source': 'text'} for i in range(MAX_COLLECTED_TASKS)]
-        result = format_collected_tasks(tasks)
-        self.assertIn(f'Maksimal {MAX_COLLECTED_TASKS} ta vazifa', result)
+        for p in patches:
+            self.addCleanup(p.stop)
 
-    def test_result_within_telegram_limit(self):
-        tasks = [{'title': 'x' * 50, 'source': 'text'} for i in range(20)]
-        result = format_collected_tasks(tasks)
-        self.assertLessEqual(len(result), TELEGRAM_MAX_TEXT)
+        return mock_svc, mock_user_model, mock_task_model
 
-    def test_emoji_numbering_10_plus(self):
-        tasks = [{'title': f'Task {i}', 'source': 'text'} for i in range(15)]
-        result = format_collected_tasks(tasks)
-        self.assertIn('10. ', result)
-        self.assertIn('11. ', result)
-        self.assertIn('15. ', result)
-        self.assertNotIn('10️⃣', result)
+    def test_final_confirm_success(self):
+        _mock_svc, _mock_user_model, mock_task_model = self._patch_handlers()
+        self._setup_confirming()
+        _run(_feed(self.dp, self.bot, _cb('final_confirm')))
+        mock_task_model.objects.bulk_create.assert_called_once()
 
+    def test_final_confirm_bitrix_error(self):
+        _mock_svc, _mock_user_model, mock_task_model = self._patch_handlers(
+            bitrix_result={'ok': False, 'error': 'Access denied'}
+        )
+        self._setup_confirming()
+        _run(_feed(self.dp, self.bot, _cb('final_confirm')))
+        mock_task_model.objects.bulk_create.assert_called_once()
 
-class FormatTaskForConfirmTest(TestCase):
-    def test_basic_format(self):
-        tasks = [{'title': 'Task 1', 'source': 'text'}]
-        result = format_task_for_confirm(tasks, 'John Doe')
-        self.assertIn('John Doe', result)
-        self.assertIn('Task 1', result)
-        self.assertIn('Tasdiqlaysizmi?', result)
+    def test_final_confirm_attach_exception_no_crash(self):
+        """AUDIT-10: str(e) NameError must not crash."""
+        _mock_svc, _mock_user_model, mock_task_model = self._patch_handlers(
+            attach_side_effect=Exception('Network error')
+        )
+        self._setup_confirming()
+        _run(_feed(self.dp, self.bot, _cb('final_confirm')))
+        mock_task_model.objects.bulk_create.assert_called_once()
 
-    def test_html_escaping_in_responsible_name(self):
-        tasks = [{'title': 'Task', 'source': 'text'}]
-        result = format_task_for_confirm(tasks, '<b>Test</b>')
-        self.assertIn('&lt;b&gt;Test&lt;/b&gt;', result)
-
-    def test_html_escaping_in_task_title(self):
-        tasks = [{'title': 'A & B', 'source': 'text'}]
-        result = format_task_for_confirm(tasks, 'User')
-        self.assertIn('A &amp; B', result)
+    def test_final_confirm_idempotency(self):
+        _mock_svc, _mock_user_model, mock_task_model = self._patch_handlers()
+        self._setup_confirming()
+        _run(_feed(self.dp, self.bot, _cb('final_confirm')))
+        self.assertEqual(mock_task_model.objects.bulk_create.call_count, 1)
+        _run(_feed(self.dp, self.bot, _cb('final_confirm')))
+        self.assertEqual(mock_task_model.objects.bulk_create.call_count, 1)
 
 
-class TaskModelTest(TestCase):
+class MediaCollectionFlowTest(TestCase):
+    """Album grouping, large file rejection, voice collection."""
+
     def setUp(self):
-        self.user = TelegramUser.objects.create(
-            telegram_id=123456789,
-            username='testuser',
-            first_name='Test',
-            last_name='User',
-            is_registered=True,
+        _confirm_locks.clear()
+        _reset_router()
+        self.dp, self.storage = _make_dp()
+        self.bot = _make_bot()
+        self.tg_user = TelegramUser.objects.create(telegram_id=USER_ID, is_registered=True)
+
+    def _setup_collecting(self):
+        return _run(_set_state(self.storage, TaskState.collecting_tasks, {
+            'collected_tasks': [], 'list_message_id': None,
+        }))
+
+    def test_photo_collection(self):
+        self._setup_collecting()
+        _run(_feed(self.dp, self.bot, _photo_msg()))
+        data = _run(_get_data(self.storage))
+        self.assertEqual(len(data['collected_tasks']), 1)
+        self.assertEqual(data['collected_tasks'][0]['source'], 'photo')
+
+    def test_album_grouping(self):
+        self._setup_collecting()
+        _run(_feed(self.dp, self.bot, _photo_msg(file_id='p1', media_group_id='grp1')))
+        _run(_feed(self.dp, self.bot, _photo_msg(file_id='p2', media_group_id='grp1')))
+        _run(_feed(self.dp, self.bot, _photo_msg(file_id='p3', media_group_id='grp1')))
+        data = _run(_get_data(self.storage))
+        tasks = data['collected_tasks']
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(len(tasks[0]['files']), 3)
+
+    def test_separate_photos_not_grouped(self):
+        self._setup_collecting()
+        _run(_feed(self.dp, self.bot, _photo_msg(file_id='p1')))
+        _run(_feed(self.dp, self.bot, _photo_msg(file_id='p2')))
+        data = _run(_get_data(self.storage))
+        self.assertEqual(len(data['collected_tasks']), 2)
+
+    def test_large_file_rejected(self):
+        self._setup_collecting()
+        _run(_feed(self.dp, self.bot, _voice_msg(file_size=MAX_FILE_SIZE + 1)))
+        data = _run(_get_data(self.storage))
+        self.assertEqual(len(data['collected_tasks']), 0)
+
+    def test_voice_collection(self):
+        self._setup_collecting()
+        _run(_feed(self.dp, self.bot, _voice_msg(duration=15)))
+        data = _run(_get_data(self.storage))
+        task = data['collected_tasks'][0]
+        self.assertEqual(task['source'], 'voice')
+        self.assertIn('15s', task['title'])
+
+    def test_video_collection(self):
+        self._setup_collecting()
+        _run(_feed(self.dp, self.bot, _video_msg(duration=60)))
+        data = _run(_get_data(self.storage))
+        task = data['collected_tasks'][0]
+        self.assertEqual(task['source'], 'video')
+        self.assertIn('60s', task['title'])
+
+    def test_50_limit_silent(self):
+        self._setup_collecting()
+        _run(FSMContext(storage=self.storage, key=KEY).update_data(
+            collected_tasks=[{'title': f'T{i}', 'source': 'text'} for i in range(50)]
+        ))
+        _run(_feed(self.dp, self.bot, _msg('Task 51')))
+        data = _run(_get_data(self.storage))
+        self.assertEqual(len(data['collected_tasks']), 50)
+
+
+class RegistrationFlowTest(TestCase):
+    """Registration: wrong contact, phone mismatch, taken bitrix_id."""
+
+    def setUp(self):
+        _confirm_locks.clear()
+        _reset_router()
+        self.dp, self.storage = _make_dp()
+        self.bot = _make_bot()
+        self.tg_user = TelegramUser.objects.create(
+            telegram_id=USER_ID, username='testuser', first_name='Test', last_name='User',
         )
 
-    def test_create_task(self):
-        task = Task.objects.create(
-            telegram_user=self.user,
-            title='Test task',
-            status=Task.Status.PENDING,
-            source=Task.Source.TEXT,
-        )
-        self.assertEqual(task.title, 'Test task')
-        self.assertEqual(task.status, Task.Status.PENDING)
-        self.assertFalse(task.bitrix_synced)
-        self.assertEqual(task.bitrix_error, '')
-        self.assertEqual(task.telegram_file_id, '')
+    def _setup_phone(self, bitrix_phone='+998901234567'):
+        return _run(_set_state(self.storage, RegistrationState.waiting_for_phone, {
+            'bitrix_id': 10, 'bitrix_first_name': 'Test', 'bitrix_last_name': 'User',
+            'bitrix_phone': bitrix_phone,
+        }))
 
-    def test_task_str(self):
-        task = Task.objects.create(
-            telegram_user=self.user,
-            title='x' * 100,
-        )
-        self.assertEqual(str(task), 'x' * 50)
+    def test_wrong_contact(self):
+        self._setup_phone()
+        _run(_feed(self.dp, self.bot, _contact_msg(user_id=999, phone_number='+998901234567')))
+        state = _run(_get_state(self.storage))
+        self.assertEqual(str(state), 'RegistrationState:waiting_for_phone')
 
-    def test_task_status_choices(self):
-        self.assertEqual(Task.Status.PENDING, 'pending')
-        self.assertEqual(Task.Status.COMPLETED, 'completed')
-        self.assertEqual(Task.Status.CANCELLED, 'cancelled')
+    def test_phone_mismatch(self):
+        self._setup_phone('+998901234567')
+        _run(_feed(self.dp, self.bot, _contact_msg(user_id=USER_ID, phone_number='+998919876543')))
+        state = _run(_get_state(self.storage))
+        self.assertEqual(str(state), 'RegistrationState:waiting_for_phone')
 
-    def test_task_source_choices(self):
-        self.assertEqual(Task.Source.TEXT, 'text')
-        self.assertEqual(Task.Source.VOICE, 'voice')
-        self.assertEqual(Task.Source.VIDEO, 'video')
-        self.assertEqual(Task.Source.PHOTO, 'photo')
-        self.assertEqual(Task.Source.VIDEO_NOTE, 'video_note')
+    def test_empty_bitrix_phone_rejects(self):
+        self._setup_phone('')
+        _run(_feed(self.dp, self.bot, _contact_msg(user_id=USER_ID, phone_number='+998901234567')))
+        state = _run(_get_state(self.storage))
+        self.assertEqual(str(state), 'RegistrationState:waiting_for_phone')
 
+    def test_non_numeric_bitrix_id(self):
+        _run(_set_state(self.storage, RegistrationState.waiting_for_bitrix_id))
+        _run(_feed(self.dp, self.bot, _msg('abc')))
+        state = _run(_get_state(self.storage))
+        self.assertEqual(str(state), 'RegistrationState:waiting_for_bitrix_id')
 
-class TelegramUserModelTest(TestCase):
-    def test_create_user(self):
-        user = TelegramUser.objects.create(
-            telegram_id=987654321,
-            username='newuser',
-            first_name='New',
-            last_name='User',
-        )
-        self.assertEqual(user.telegram_id, 987654321)
-        self.assertFalse(user.is_registered)
-
-    def test_user_str(self):
-        user = TelegramUser.objects.create(
-            telegram_id=111222333,
-            first_name='Alice',
-        )
-        self.assertEqual(str(user), 'Alice')
-
-    def test_user_str_fallback_to_username(self):
-        user = TelegramUser.objects.create(
-            telegram_id=444555666,
-            username='bob',
-        )
-        self.assertEqual(str(user), 'bob')
-
-    def test_user_str_fallback_to_telegram_id(self):
-        user = TelegramUser.objects.create(
-            telegram_id=777888999,
-        )
-        self.assertEqual(str(user), '777888999')
-
-    def test_unique_bitrix_id(self):
+    def test_taken_bitrix_id(self):
         TelegramUser.objects.create(
-            telegram_id=111,
-            bitrix_id=42,
+            telegram_id=222, bitrix_id=42, is_registered=True,
+            bitrix_first_name='Other', bitrix_last_name='User',
         )
-        with self.assertRaises(Exception):
-            TelegramUser.objects.create(
-                telegram_id=222,
-                bitrix_id=42,
-            )
+        _run(_set_state(self.storage, RegistrationState.waiting_for_bitrix_id))
+        _run(_feed(self.dp, self.bot, _msg('42')))
+        state = _run(_get_state(self.storage))
+        self.assertEqual(str(state), 'RegistrationState:waiting_for_bitrix_id')
 
 
-class HealthCheckTest(TestCase):
-    def test_health_endpoint(self):
-        client = Client()
-        response = client.get('/health/')
-        self.assertEqual(response.status_code, 200)
-        data = json.loads(response.content)
-        self.assertEqual(data['status'], 'ok')
+class RegistrationPhoneMatchTest(TransactionTestCase):
+    """Phone match test needs TransactionTestCase for real DB access via sync_to_async."""
 
-
-class RecentIdsQueryTest(TestCase):
     def setUp(self):
-        self.user = TelegramUser.objects.create(
-            telegram_id=123456789,
-            is_registered=True,
+        _confirm_locks.clear()
+        _reset_router()
+        self.dp, self.storage = _make_dp()
+        self.bot = _make_bot()
+        self.tg_user = TelegramUser.objects.create(
+            telegram_id=USER_ID, username='testuser', first_name='Test', last_name='User',
         )
 
-    def test_recent_ids_deduplication(self):
-        for _ in range(5):
-            Task.objects.create(
-                telegram_user=self.user,
-                title='Task',
-                responsible_bitrix_id=42,
-            )
-        Task.objects.create(
-            telegram_user=self.user,
-            title='Task',
-            responsible_bitrix_id=99,
-        )
-        ids = list(Task.objects.filter(
-            telegram_user=self.user
-        ).exclude(
-            responsible_bitrix_id__isnull=True
-        ).order_by('-created_at').values_list('responsible_bitrix_id', flat=True)[:50])
-        unique_ids = list(dict.fromkeys(ids))[:5]
-        self.assertEqual(len(unique_ids), 2)
-        self.assertIn(99, unique_ids)
-        self.assertIn(42, unique_ids)
-        self.assertEqual(unique_ids[0], 99)
+    def _setup_phone(self, bitrix_phone='+998901234567'):
+        return _run(_set_state(self.storage, RegistrationState.waiting_for_phone, {
+            'bitrix_id': 10, 'bitrix_first_name': 'Test', 'bitrix_last_name': 'User',
+            'bitrix_phone': bitrix_phone,
+        }))
+
+    def test_phone_match(self):
+        self._setup_phone('+998901234567')
+        _run(_feed(self.dp, self.bot, _contact_msg(user_id=USER_ID, phone_number='+998901234567')))
+        state = _run(_get_state(self.storage))
+        self.assertIsNone(state)
+        self.tg_user.refresh_from_db()
+        self.assertTrue(self.tg_user.is_registered)

@@ -1,22 +1,23 @@
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from asgiref.sync import sync_to_async
-import logging
 import datetime
+import logging
 
-from users.models import TelegramUser
-from tasks.models import Task
-from tasks.services import bitrix_service
-from bot.states.task import TaskState
+from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from asgiref.sync import sync_to_async
+
 from bot.keyboards.main_menu import get_main_menu
 from bot.keyboards.task import (
     get_collecting_keyboard,
     get_confirm_keyboard,
     get_responsible_keyboard,
-    get_search_results_keyboard,
     get_search_cancel_keyboard,
+    get_search_results_keyboard,
 )
+from bot.states.task import TaskState
+from tasks.models import Task
+from tasks.services import bitrix_service
+from users.models import TelegramUser
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ async def update_list_message(message: Message, state: FSMContext, text: str):
 @router.message(F.text == '📋 Vazifa yaratish')
 async def create_task(message: Message, state: FSMContext):
     try:
-        user = await sync_to_async(TelegramUser.objects.get)(
+        _user = await sync_to_async(TelegramUser.objects.get)(
             telegram_id=message.from_user.id, is_registered=True
         )
         await state.update_data(collected_tasks=[], list_message_id=None)
@@ -99,7 +100,7 @@ async def create_task(message: Message, state: FSMContext):
             "/start buyrug'ini bosing.",
             reply_markup=get_main_menu(),
         )
-    except Exception as e:
+    except Exception:
         logger.exception('Error in create_task')
         await message.answer("Xatolik yuz berdi.")
 
@@ -117,7 +118,7 @@ async def collect_text_task(message: Message, state: FSMContext):
         await state.update_data(collected_tasks=collected)
 
         await update_list_message(message, state, format_collected_tasks(collected))
-    except Exception as e:
+    except Exception:
         logger.exception('Error in collect_text_task')
         await message.answer("Xatolik yuz berdi.")
 
@@ -131,7 +132,7 @@ async def collect_voice_task(message: Message, state: FSMContext):
         await state.update_data(collected_tasks=collected)
 
         await update_list_message(message, state, format_collected_tasks(collected))
-    except Exception as e:
+    except Exception:
         logger.exception('Error in collect_voice_task')
         await message.answer("Xatolik yuz berdi.")
 
@@ -145,7 +146,7 @@ async def collect_video_task(message: Message, state: FSMContext):
         await state.update_data(collected_tasks=collected)
 
         await update_list_message(message, state, format_collected_tasks(collected))
-    except Exception as e:
+    except Exception:
         logger.exception('Error in collect_video_task')
         await message.answer("Xatolik yuz berdi.")
 
@@ -161,7 +162,7 @@ async def collect_photo_task(message: Message, state: FSMContext):
         await state.update_data(collected_tasks=collected)
 
         await update_list_message(message, state, format_collected_tasks(collected))
-    except Exception as e:
+    except Exception:
         logger.exception('Error in collect_photo_task')
         await message.answer("Xatolik yuz berdi.")
 
@@ -175,7 +176,7 @@ async def collect_video_note_task(message: Message, state: FSMContext):
         await state.update_data(collected_tasks=collected)
 
         await update_list_message(message, state, format_collected_tasks(collected))
-    except Exception as e:
+    except Exception:
         logger.exception('Error in collect_video_note_task')
         await message.answer("Xatolik yuz berdi.")
 
@@ -240,7 +241,7 @@ async def confirm_tasks(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_responsible_keyboard(users, recent_ids),
         )
         await callback.answer()
-    except Exception as e:
+    except Exception:
         logger.exception('Error in confirm_tasks')
         await callback.message.answer("Xatolik yuz berdi.")
         await callback.answer()
@@ -279,7 +280,7 @@ async def select_responsible(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_confirm_keyboard(),
         )
         await callback.answer()
-    except Exception as e:
+    except Exception:
         logger.exception('Error in select_responsible')
         await callback.message.answer("Xatolik yuz berdi.")
         await callback.answer()
@@ -354,7 +355,7 @@ async def final_confirm(callback: CallbackQuery, state: FSMContext):
                                 file_name=file_name,
                                 file_content=file_content.getvalue(),
                             )
-                        except Exception as e:
+                        except Exception:
                             logger.exception(f"Error attaching file to Bitrix task: {bitrix_task_id}")
 
         task_list = '\n'.join([f"{i+1}. {t.title}" for i, t in enumerate(tasks_saved)])
@@ -382,7 +383,7 @@ async def final_confirm(callback: CallbackQuery, state: FSMContext):
 
         await callback.message.answer("Menyu:", reply_markup=get_main_menu())
         await state.clear()
-    except Exception as e:
+    except Exception:
         logger.exception('Error in final_confirm')
         await callback.message.answer("Xatolik yuz berdi.")
         await state.clear()
@@ -414,7 +415,7 @@ async def cancel_task(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Menyu:", reply_markup=get_main_menu())
         await state.clear()
         await callback.answer()
-    except Exception as e:
+    except Exception:
         logger.exception('Error in cancel_task')
         await callback.message.answer("Xatolik yuz berdi.")
         await state.clear()
@@ -432,7 +433,7 @@ async def search_responsible(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_search_cancel_keyboard(),
         )
         await callback.answer()
-    except Exception as e:
+    except Exception:
         logger.exception('Error in search_responsible')
         await callback.message.answer("Xatolik yuz berdi.")
         await callback.answer()
@@ -470,7 +471,7 @@ async def process_search(message: Message, state: FSMContext):
             reply_markup=get_search_results_keyboard(users, recent_ids),
         )
         await state.update_data(list_message_id=search_msg.message_id)
-    except Exception as e:
+    except Exception:
         logger.exception('Error in process_search')
         await message.answer("Xatolik yuz berdi.")
 
@@ -491,7 +492,7 @@ async def back_to_responsible_list(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_responsible_keyboard(users, recent_ids),
         )
         await callback.answer()
-    except Exception as e:
+    except Exception:
         logger.exception('Error in back_to_responsible_list')
         await callback.message.answer("Xatolik yuz berdi.")
         await callback.answer()
@@ -513,7 +514,7 @@ async def cancel_search(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_responsible_keyboard(users, recent_ids),
         )
         await callback.answer()
-    except Exception as e:
+    except Exception:
         logger.exception('Error in cancel_search')
         await callback.message.answer("Xatolik yuz berdi.")
         await callback.answer()

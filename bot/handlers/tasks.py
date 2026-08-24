@@ -1,24 +1,28 @@
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from asgiref.sync import sync_to_async
-from django.conf import settings
-from django.utils import timezone
+import asyncio
+import hashlib
 import html
 import logging
 
-from users.models import TelegramUser
-from tasks.models import Task
-from tasks.services import bitrix_service
-from bot.states.task import TaskState
+from aiogram import F, Router
+from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from asgiref.sync import sync_to_async
+from django.conf import settings
+from django.utils import timezone
+
 from bot.keyboards.main_menu import get_main_menu
 from bot.keyboards.task import (
     get_collecting_keyboard,
     get_confirm_keyboard,
     get_responsible_keyboard,
-    get_search_results_keyboard,
     get_search_cancel_keyboard,
+    get_search_results_keyboard,
 )
+from bot.states.task import TaskState
+from tasks.models import Task
+from tasks.services import bitrix_service
+from users.models import TelegramUser
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -27,6 +31,8 @@ MAX_COLLECTED_TASKS = 50
 MAX_TITLE_LENGTH = 500
 TELEGRAM_MAX_TEXT = 4096
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+_confirm_locks: dict[int, asyncio.Lock] = {}
 
 
 SOURCE_ICONS = {
@@ -97,7 +103,7 @@ async def update_list_message(message: Message, state: FSMContext, text: str):
 @router.message(F.text == '📋 Vazifa yaratish')
 async def create_task(message: Message, state: FSMContext):
     try:
-        user = await sync_to_async(TelegramUser.objects.get)(
+        _user = await sync_to_async(TelegramUser.objects.get)(
             telegram_id=message.from_user.id, is_registered=True
         )
         await state.update_data(collected_tasks=[], list_message_id=None)
@@ -131,11 +137,6 @@ async def collect_text_task(message: Message, state: FSMContext):
         collected = data.get('collected_tasks', [])
 
         if len(collected) >= MAX_COLLECTED_TASKS:
-            await message.answer(
-                f"⚠️ Maksimal {MAX_COLLECTED_TASKS} ta vazifa yig'ildi.\n"
-                "Tasdiqlang yoki bekor qiling.",
-                reply_markup=get_collecting_keyboard(),
-            )
             return
 
         collected.append({'title': task_text[:MAX_TITLE_LENGTH], 'source': 'text'})
@@ -154,9 +155,13 @@ async def collect_voice_task(message: Message, state: FSMContext):
         collected = data.get('collected_tasks', [])
 
         if len(collected) >= MAX_COLLECTED_TASKS:
+            return
+
+        file_size = message.voice.file_size or 0
+        if file_size > MAX_FILE_SIZE:
+            size_mb = file_size // (1024 * 1024)
             await message.answer(
-                f"⚠️ Maksimal {MAX_COLLECTED_TASKS} ta vazifa yig'ildi.\n"
-                "Tasdiqlang yoki bekor qiling.",
+                f"❌ Fayl juda katta ({size_mb} MB). Maksimal {MAX_FILE_SIZE // (1024 * 1024)} MB.",
                 reply_markup=get_collecting_keyboard(),
             )
             return
@@ -167,7 +172,7 @@ async def collect_voice_task(message: Message, state: FSMContext):
             'title': title[:MAX_TITLE_LENGTH],
             'source': 'voice',
             'file_id': message.voice.file_id,
-            'file_size': message.voice.file_size or 0,
+            'file_size': file_size,
         })
         await state.update_data(collected_tasks=collected)
 
@@ -184,9 +189,13 @@ async def collect_video_task(message: Message, state: FSMContext):
         collected = data.get('collected_tasks', [])
 
         if len(collected) >= MAX_COLLECTED_TASKS:
+            return
+
+        file_size = message.video.file_size or 0
+        if file_size > MAX_FILE_SIZE:
+            size_mb = file_size // (1024 * 1024)
             await message.answer(
-                f"⚠️ Maksimal {MAX_COLLECTED_TASKS} ta vazifa yig'ildi.\n"
-                "Tasdiqlang yoki bekor qiling.",
+                f"❌ Fayl juda katta ({size_mb} MB). Maksimal {MAX_FILE_SIZE // (1024 * 1024)} MB.",
                 reply_markup=get_collecting_keyboard(),
             )
             return
@@ -197,7 +206,7 @@ async def collect_video_task(message: Message, state: FSMContext):
             'title': title[:MAX_TITLE_LENGTH],
             'source': 'video',
             'file_id': message.video.file_id,
-            'file_size': message.video.file_size or 0,
+            'file_size': file_size,
         })
         await state.update_data(collected_tasks=collected)
 
@@ -214,21 +223,26 @@ async def collect_photo_task(message: Message, state: FSMContext):
         collected = data.get('collected_tasks', [])
 
         if len(collected) >= MAX_COLLECTED_TASKS:
-            await message.answer(
-                f"⚠️ Maksimal {MAX_COLLECTED_TASKS} ta vazifa yig'ildi.\n"
-                "Tasdiqlang yoki bekor qiling.",
-                reply_markup=get_collecting_keyboard(),
-            )
             return
 
         caption = message.caption.strip() if message.caption else None
         title = (caption or 'Rasm')[:MAX_TITLE_LENGTH]
+        media_group_id = message.media_group_id
+        new_file = {'file_id': message.photo[-1].file_id, 'file_size': message.photo[-1].file_size or 0}
+
+        if media_group_id and collected:
+            last = collected[-1]
+            if last.get('media_group_id') == media_group_id and last.get('source') == 'photo':
+                last.setdefault('files', []).append(new_file)
+                await state.update_data(collected_tasks=collected)
+                await update_list_message(message, state, format_collected_tasks(collected))
+                return
+
         collected.append({
             'title': title,
             'source': 'photo',
-            'file_id': message.photo[-1].file_id,
-            'file_size': message.photo[-1].file_size or 0,
-            'media_group_id': message.media_group_id,
+            'media_group_id': media_group_id,
+            'files': [new_file],
         })
         await state.update_data(collected_tasks=collected)
 
@@ -245,9 +259,13 @@ async def collect_video_note_task(message: Message, state: FSMContext):
         collected = data.get('collected_tasks', [])
 
         if len(collected) >= MAX_COLLECTED_TASKS:
+            return
+
+        file_size = message.video_note.file_size or 0
+        if file_size > MAX_FILE_SIZE:
+            size_mb = file_size // (1024 * 1024)
             await message.answer(
-                f"⚠️ Maksimal {MAX_COLLECTED_TASKS} ta vazifa yig'ildi.\n"
-                "Tasdiqlang yoki bekor qiling.",
+                f"❌ Fayl juda katta ({size_mb} MB). Maksimal {MAX_FILE_SIZE // (1024 * 1024)} MB.",
                 reply_markup=get_collecting_keyboard(),
             )
             return
@@ -258,7 +276,7 @@ async def collect_video_note_task(message: Message, state: FSMContext):
             'title': title[:MAX_TITLE_LENGTH],
             'source': 'video_note',
             'file_id': message.video_note.file_id,
-            'file_size': message.video_note.file_size or 0,
+            'file_size': file_size,
         })
         await state.update_data(collected_tasks=collected)
 
@@ -321,7 +339,7 @@ async def confirm_tasks(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
 
 
-@router.callback_query(F.data.startswith('select_responsible:'), TaskState.waiting_for_responsible)
+@router.callback_query(F.data.startswith('select_responsible:'), StateFilter(TaskState.waiting_for_responsible, TaskState.waiting_for_responsible_search))
 async def select_responsible(callback: CallbackQuery, state: FSMContext):
     try:
         bitrix_id = int(callback.data.split(':')[1])
@@ -363,150 +381,177 @@ async def select_responsible(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == 'final_confirm', TaskState.confirming_tasks)
 async def final_confirm(callback: CallbackQuery, state: FSMContext):
-    try:
-        data = await state.get_data()
-
-        if data.get('final_confirm_processed'):
-            await callback.answer("Allaqachon qayta ishlandi.", show_alert=True)
-            return
-        await state.update_data(final_confirm_processed=True)
-
-        collected = data.get('collected_tasks', [])
-        list_msg_id = data.get('list_message_id')
-        responsible_bitrix_id = data.get('responsible_bitrix_id')
-        responsible_name = data.get('responsible_name')
-
-        if not collected:
-            await callback.answer("Vazifalar yo'q.")
-            return
-
-        await callback.message.edit_reply_markup(reply_markup=None)
+    chat_id = callback.message.chat.id
+    lock = _confirm_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
         try:
-            await callback.answer()
-        except Exception:
-            pass
+            data = await state.get_data()
 
-        user = await sync_to_async(TelegramUser.objects.get)(
-            telegram_id=callback.from_user.id
-        )
+            if data.get('final_confirm_processed'):
+                await callback.answer("Allaqachon qayta ishlandi.", show_alert=True)
+                return
 
-        tasks_to_create = [
-            Task(
-                telegram_user=user,
-                title=item['title'][:MAX_TITLE_LENGTH],
-                responsible_bitrix_id=responsible_bitrix_id,
-                responsible_name=responsible_name,
-                status=Task.Status.PENDING,
-                source=item['source'],
-                telegram_file_id=item.get('file_id', ''),
-            )
-            for item in collected
-        ]
-        tasks_saved = await sync_to_async(Task.objects.bulk_create)(tasks_to_create)
+            collected = data.get('collected_tasks', [])
+            list_msg_id = data.get('list_message_id')
+            responsible_bitrix_id = data.get('responsible_bitrix_id')
+            responsible_name = data.get('responsible_name')
 
-        bitrix_task_id = None
-        bitrix_url = None
-        bitrix_error_msg = None
-        attachment_errors = []
-        if user.bitrix_id and responsible_bitrix_id:
-            creator_name = f"{user.bitrix_first_name or ''} {user.bitrix_last_name or ''}".strip() or str(user.telegram_id)
-            today = timezone.localdate().strftime('%d.%m.%Y')
-            task_title = f"{today} — {creator_name} → {responsible_name}"
+            if not collected:
+                await callback.answer("Vazifalar yo'q.")
+                return
 
-            task_description = '\n'.join([f"{i+1}. {item['title']}" for i, item in enumerate(collected)])
+            idempotency_key = hashlib.sha256(
+                f"{chat_id}:{responsible_bitrix_id}:{len(collected)}:{','.join(t['title'][:50] for t in collected)}".encode()
+            ).hexdigest()[:64]
 
-            bitrix_result = await bitrix_service.create_task(
-                title=task_title,
-                creator_id=user.bitrix_id,
-                responsible_id=responsible_bitrix_id,
-                description=task_description,
-            )
-            if bitrix_result.get('ok'):
-                bitrix_task_id = int(bitrix_result['id'])
-                bitrix_url = f"{settings.BITRIX_PORTAL_URL}/company/personal/user/{user.bitrix_id}/tasks/task/view/{bitrix_task_id}/"
-                for task in tasks_saved:
-                    task.bitrix_task_id = bitrix_task_id
-                    task.bitrix_synced = True
-                await sync_to_async(Task.objects.bulk_update)(tasks_saved, ['bitrix_task_id', 'bitrix_synced'])
+            existing = await sync_to_async(
+                lambda: Task.objects.filter(idempotency_key=idempotency_key).exists()
+            )()
+            if existing:
+                await state.update_data(final_confirm_processed=True)
+                await callback.answer("Allaqachon qayta ishlandi.", show_alert=True)
+                return
 
-                for i, item in enumerate(collected):
-                    if item.get('file_id'):
-                        file_size = item.get('file_size', 0)
-                        if file_size > MAX_FILE_SIZE:
-                            size_mb = file_size // (1024 * 1024)
-                            attachment_errors.append(f"{i+1}. {item['title'][:30]} ({size_mb} MB - hajm juda katta)")
-                            continue
-                        try:
-                            file_info = await callback.message.bot.get_file(item['file_id'])
-                            file_content = await callback.message.bot.download_file(file_info.file_path)
-                            ext = file_info.file_path.split('.')[-1]
-                            file_name = f"{item['source']}.{ext}"
-                            attach_ok = await bitrix_service.attach_file_to_task(
-                                task_id=bitrix_task_id,
-                                file_name=file_name,
-                                file_content=file_content.getvalue(),
-                            )
-                            if not attach_ok:
-                                attachment_errors.append(f"{i+1}. {item['title'][:30]} (Bitrix'ga yuklashda xato)")
-                        except Exception:
-                            logger.exception(f"Error attaching file to Bitrix task: {bitrix_task_id}")
-                            attachment_errors.append(f"{i+1}. {item['title'][:30]} (xato: {str(e)[:50]})")
-            else:
-                bitrix_error_msg = bitrix_result.get('error', 'Noma\'lum xato')
-                for task in tasks_saved:
-                    task.bitrix_error = bitrix_error_msg
-                await sync_to_async(Task.objects.bulk_update)(tasks_saved, ['bitrix_error'])
-        elif not user.bitrix_id:
-            bitrix_error_msg = "Bitrix ID kiritilmagan"
-        elif not responsible_bitrix_id:
-            bitrix_error_msg = "Mas'ul tanlanmagan"
+            await state.update_data(final_confirm_processed=True)
 
-        task_list = '\n'.join([f"{i+1}. {html.escape(t.title)}" for i, t in enumerate(tasks_saved)])
-
-        if bitrix_url:
-            status_line = f"✅ <b>{len(tasks_saved)} ta vazifa Bitrix24 ga yuborildi!</b>\n\n"
-            bitrix_link = f"\n\n🔗 Bitrix task:\n{bitrix_url}"
-        else:
-            status_line = f"⚠️ <b>{len(tasks_saved)} ta vazifa faqat lokal saqlandi</b>\n"
-            bitrix_link = f"\n\n❌ Bitrix24 ga yuborilmadi: {html.escape(bitrix_error_msg)}"
-
-        attachment_warning = ""
-        if attachment_errors:
-            attachment_warning = "\n\n⚠️ <b>Fayllar yuklanmadi:</b>\n" + '\n'.join(html.escape(e) for e in attachment_errors)
-
-        text = (
-            f"{status_line}\n"
-            f"👤 Mas'ul: {html.escape(responsible_name or '')}\n\n"
-            f"{task_list}"
-            f"{bitrix_link}"
-            f"{attachment_warning}"
-        )
-
-        if len(text) > TELEGRAM_MAX_TEXT:
-            text = text[:TELEGRAM_MAX_TEXT - 20] + "\n\n... (xabar qisqartirildi)"
-
-        if list_msg_id:
+            await callback.message.edit_reply_markup(reply_markup=None)
             try:
-                await callback.message.bot.edit_message_text(
-                    text=text,
-                    chat_id=callback.message.chat.id,
-                    message_id=list_msg_id,
-                    parse_mode='HTML',
-                )
+                await callback.answer()
             except Exception:
+                pass
+
+            user = await sync_to_async(TelegramUser.objects.get)(
+                telegram_id=callback.from_user.id
+            )
+
+            tasks_to_create = [
+                Task(
+                    telegram_user=user,
+                    title=item['title'][:MAX_TITLE_LENGTH],
+                    responsible_bitrix_id=responsible_bitrix_id,
+                    responsible_name=responsible_name,
+                    status=Task.Status.PENDING,
+                    source=item['source'],
+                    telegram_file_id=item.get('file_id', ''),
+                    idempotency_key=idempotency_key,
+                )
+                for item in collected
+            ]
+            tasks_saved = await sync_to_async(Task.objects.bulk_create)(tasks_to_create)
+
+            bitrix_task_id = None
+            bitrix_url = None
+            bitrix_error_msg = None
+            attachment_errors = []
+            if user.bitrix_id and responsible_bitrix_id:
+                creator_name = f"{user.bitrix_first_name or ''} {user.bitrix_last_name or ''}".strip() or str(user.telegram_id)
+                today = timezone.localdate().strftime('%d.%m.%Y')
+                task_title = f"{today} — {creator_name} → {responsible_name}"
+
+                task_description = '\n'.join([f"{i+1}. {item['title']}" for i, item in enumerate(collected)])
+
+                bitrix_result = await bitrix_service.create_task(
+                    title=task_title,
+                    creator_id=user.bitrix_id,
+                    responsible_id=responsible_bitrix_id,
+                    description=task_description,
+                )
+                if bitrix_result.get('ok'):
+                    bitrix_task_id = int(bitrix_result['id'])
+                    bitrix_url = f"{settings.BITRIX_PORTAL_URL}/company/personal/user/{user.bitrix_id}/tasks/task/view/{bitrix_task_id}/"
+                    for task in tasks_saved:
+                        task.bitrix_task_id = bitrix_task_id
+                        task.bitrix_synced = True
+                    await sync_to_async(Task.objects.bulk_update)(tasks_saved, ['bitrix_task_id', 'bitrix_synced'])
+
+                    try:
+                        for i, item in enumerate(collected):
+                            files = item.get('files', [{'file_id': item.get('file_id'), 'file_size': item.get('file_size', 0)}])
+                            for j, f in enumerate(files):
+                                file_id = f.get('file_id')
+                                if not file_id:
+                                    continue
+                                file_size = f.get('file_size', 0)
+                                if file_size > MAX_FILE_SIZE:
+                                    size_mb = file_size // (1024 * 1024)
+                                    label = f"{i+1}" if len(files) == 1 else f"{i+1}.{j+1}"
+                                    attachment_errors.append(f"{label}. {item['title'][:30]} ({size_mb} MB - hajm juda katta)")
+                                    continue
+                                try:
+                                    file_info = await callback.message.bot.get_file(file_id)
+                                    file_content = await callback.message.bot.download_file(file_info.file_path)
+                                    ext = file_info.file_path.split('.')[-1]
+                                    file_name = f"{item['source']}.{ext}"
+                                    attach_ok = await bitrix_service.attach_file_to_task(
+                                        task_id=bitrix_task_id,
+                                        file_name=file_name,
+                                        file_content=file_content.getvalue(),
+                                    )
+                                    if not attach_ok:
+                                        label = f"{i+1}" if len(files) == 1 else f"{i+1}.{j+1}"
+                                        attachment_errors.append(f"{label}. {item['title'][:30]} (Bitrix'ga yuklashda xato)")
+                                except Exception as e:
+                                    logger.exception(f"Error attaching file to Bitrix task: {bitrix_task_id}")
+                                    label = f"{i+1}" if len(files) == 1 else f"{i+1}.{j+1}"
+                                    attachment_errors.append(f"{label}. {item['title'][:30]} (xato: {str(e)[:50]})")
+                    except Exception:
+                        logger.exception("Unexpected error in attachment loop")
+                else:
+                    bitrix_error_msg = bitrix_result.get('error', 'Noma\'lum xato')
+                    for task in tasks_saved:
+                        task.bitrix_error = bitrix_error_msg
+                    await sync_to_async(Task.objects.bulk_update)(tasks_saved, ['bitrix_error'])
+            elif not user.bitrix_id:
+                bitrix_error_msg = "Bitrix ID kiritilmagan"
+            elif not responsible_bitrix_id:
+                bitrix_error_msg = "Mas'ul tanlanmagan"
+
+            task_list = '\n'.join([f"{i+1}. {html.escape(t.title)}" for i, t in enumerate(tasks_saved)])
+
+            if bitrix_url:
+                status_line = f"✅ <b>{len(tasks_saved)} ta vazifa Bitrix24 ga yuborildi!</b>\n\n"
+                bitrix_link = f"\n\n🔗 Bitrix task:\n{bitrix_url}"
+            else:
+                status_line = f"⚠️ <b>{len(tasks_saved)} ta vazifa faqat lokal saqlandi</b>\n"
+                bitrix_link = f"\n\n❌ Bitrix24 ga yuborilmadi: {html.escape(bitrix_error_msg)}"
+
+            attachment_warning = ""
+            if attachment_errors:
+                attachment_warning = "\n\n⚠️ <b>Fayllar yuklanmadi:</b>\n" + '\n'.join(html.escape(e) for e in attachment_errors)
+
+            text = (
+                f"{status_line}\n"
+                f"👤 Mas'ul: {html.escape(responsible_name or '')}\n\n"
+                f"{task_list}"
+                f"{bitrix_link}"
+                f"{attachment_warning}"
+            )
+
+            if len(text) > TELEGRAM_MAX_TEXT:
+                text = text[:TELEGRAM_MAX_TEXT - 20] + "\n\n... (xabar qisqartirildi)"
+
+            if list_msg_id:
+                try:
+                    await callback.message.bot.edit_message_text(
+                        text=text,
+                        chat_id=callback.message.chat.id,
+                        message_id=list_msg_id,
+                        parse_mode='HTML',
+                    )
+                except Exception:
+                    await callback.message.answer(text, parse_mode='HTML')
+            else:
                 await callback.message.answer(text, parse_mode='HTML')
-        else:
-            await callback.message.answer(text, parse_mode='HTML')
 
-        await callback.message.answer("Menyu:", reply_markup=get_main_menu())
-        await state.clear()
-    except Exception:
-        logger.exception('Error in final_confirm')
-        await callback.message.answer("Xatolik yuz berdi.")
-        await state.clear()
+            await callback.message.answer("Menyu:", reply_markup=get_main_menu())
+            await state.clear()
+        except Exception:
+            logger.exception('Error in final_confirm')
+            await callback.message.answer("Xatolik yuz berdi.")
+            await state.clear()
 
 
-@router.callback_query(F.data == 'cancel_task', TaskState.collecting_tasks)
+@router.callback_query(F.data == 'cancel_task', StateFilter(TaskState.collecting_tasks, TaskState.waiting_for_responsible, TaskState.waiting_for_responsible_search, TaskState.confirming_tasks))
 async def cancel_task(callback: CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
@@ -593,7 +638,7 @@ async def process_search(message: Message, state: FSMContext):
         await message.answer("Xatolik yuz berdi.")
 
 
-@router.callback_query(F.data == 'back_to_responsible_list', TaskState.waiting_for_responsible)
+@router.callback_query(F.data == 'back_to_responsible_list', StateFilter(TaskState.waiting_for_responsible, TaskState.waiting_for_responsible_search))
 async def back_to_responsible_list(callback: CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()

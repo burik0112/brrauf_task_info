@@ -1,7 +1,8 @@
-import aiohttp
 import asyncio
 import logging
 import time
+
+import aiohttp
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,13 @@ CACHE_TTL = 600
 
 class BitrixService:
     def __init__(self):
-        self.base_url = settings.BITRIX_WEBHOOK_URL.rstrip('/')
+        raw_url = getattr(settings, 'BITRIX_WEBHOOK_URL', '') or ''
+        self.base_url = raw_url.rstrip('/')
+        if not self.base_url:
+            raise ValueError(
+                'BITRIX_WEBHOOK_URL is not configured. '
+                'Set it in .env file before starting the bot.'
+            )
         self._session = None
         self._users_cache = None
         self._cache_timestamp = 0.0

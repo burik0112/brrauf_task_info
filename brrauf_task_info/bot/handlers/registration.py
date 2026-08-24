@@ -1,13 +1,14 @@
-from aiogram import Router, F
-from aiogram.types import Message, Contact, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.context import FSMContext
-from asgiref.sync import sync_to_async
 import logging
 
-from users.models import TelegramUser
-from tasks.services import bitrix_service
-from bot.states.registration import RegistrationState
+from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from asgiref.sync import sync_to_async
+
 from bot.keyboards.main_menu import get_main_menu
+from bot.states.registration import RegistrationState
+from tasks.services import bitrix_service
+from users.models import TelegramUser
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ async def process_bitrix_id(message: Message, state: FSMContext):
             reply_markup=phone_keyboard,
         )
         await state.set_state(RegistrationState.waiting_for_phone)
-    except Exception as e:
+    except Exception:
         logger.exception('Error in process_bitrix_id')
         await message.answer("Xatolik yuz berdi. Qaytadan urinib ko'ring.")
 
@@ -100,7 +101,7 @@ async def process_phone(message: Message, state: FSMContext):
         logger.error('User not found during registration')
         await message.answer("Xatolik: Foydalanuvchi topilmadi. /start buyrug'ini bosing.")
         await state.clear()
-    except Exception as e:
+    except Exception:
         logger.exception('Error in process_phone')
         await message.answer("Xatolik yuz berdi. Qaytadan urinib ko'ring.")
         await state.clear()

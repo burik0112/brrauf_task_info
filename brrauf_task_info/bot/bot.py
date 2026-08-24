@@ -5,20 +5,21 @@ import os
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-
 from dotenv import load_dotenv
 
 load_dotenv()
 
 import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import django
+
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 django.setup()
 
-from bot.handlers.start import router as start_router
 from bot.handlers.registration import router as registration_router
+from bot.handlers.start import router as start_router
 from bot.handlers.tasks import router as tasks_router
 
 logging.basicConfig(

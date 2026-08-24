@@ -1,4 +1,5 @@
 from django.db import models
+
 from users.models import TelegramUser
 
 
@@ -27,6 +28,7 @@ class Task(models.Model):
     bitrix_synced = models.BooleanField(default=False, verbose_name='Bitrix Synced')
     bitrix_error = models.CharField(max_length=500, blank=True, default='', verbose_name='Bitrix Error')
     telegram_file_id = models.TextField(blank=True, default='', verbose_name='Telegram File ID')
+    idempotency_key = models.CharField(max_length=64, blank=True, default='', db_index=True, verbose_name='Idempotency Key')
     status = models.CharField(
         max_length=10,
         choices=Status.choices,

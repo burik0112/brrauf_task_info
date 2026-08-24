@@ -1,0 +1,52 @@
+[project]
+name = "brrauf-task-info"
+version = "1.0.0"
+description = "Telegram bot for task management with Bitrix24 integration"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "Django==5.1.11",
+    "aiogram==3.29.0",
+    "aiohttp==3.14.1",
+    "asgiref==3.11.1",
+    "python-dotenv==1.2.2",
+    "redis==8.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-django==4.14.0",
+    "ruff==0.16.2",
+]
+
+[build-system]
+requires = ["setuptools>=84.0.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "S", "RUF", "BLE", "SIM", "DTZ"]
+ignore = [
+    "RUF012",  # Django models/admin use mutable class attributes by convention
+    "RUF013",  # Implicit Optional — not critical for this codebase
+    "BLE001",  # Broad except Exception — used intentionally for error handling
+    "S110",    # try-except-pass — used for callback.answer() which can fail
+    "SIM105",  # contextlib.suppress — style preference, not worth changing
+    "SIM117",  # Nested with statements — kept for readability
+    "DTZ011",  # datetime.date.today() — acceptable for task titles
+    "E402",    # Module import not at top — intentional in bot.py for Django setup
+    "E501",    # Line too long — handled by formatter, not ruff
+]
+
+[tool.ruff.lint.per-file-ignores]
+"*/migrations/*" = ["RUF012", "E501"]
+"*/tests.py" = ["F401", "B017", "I001"]
+"tasks/tests.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bot", "tasks", "users"]

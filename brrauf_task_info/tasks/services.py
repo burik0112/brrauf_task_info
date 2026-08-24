@@ -1,5 +1,6 @@
-import aiohttp
 import logging
+
+import aiohttp
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ class BitrixService:
                             "full_name": f"{user.get('NAME', '')} {user.get('LAST_NAME', '')}".strip(),
                         }
                     return None
-        except Exception as e:
+        except Exception:
             logger.exception(f"Bitrix get_user error: {bitrix_id}")
             return None
 
@@ -52,7 +53,7 @@ class BitrixService:
                     if task:
                         return {"id": task.get("id"), "title": task.get("title"), "link": task.get("link", "")}
                     return None
-        except Exception as e:
+        except Exception:
             logger.exception(f"Bitrix create_task error: {title}")
             return None
 
@@ -81,7 +82,7 @@ class BitrixService:
                         else:
                             break
             return all_users
-        except Exception as e:
+        except Exception:
             logger.exception("Bitrix get_all_users error")
             return []
 
@@ -113,21 +114,20 @@ class BitrixService:
         try:
             import base64
             content_b64 = base64.b64encode(file_content).decode('utf-8')
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/task.item.addfile",
-                    json={
-                        "TASK_ID": str(task_id),
-                        "FILE": {
-                            "NAME": file_name,
-                            "CONTENT": content_b64,
-                        }
-                    },
-                ) as resp:
-                    data = await resp.json()
-                    logger.info(f"Bitrix attach_file response: {data}")
-                    return "result" in data
-        except Exception as e:
+            async with aiohttp.ClientSession() as session, session.post(
+                f"{self.base_url}/task.item.addfile",
+                json={
+                    "TASK_ID": str(task_id),
+                    "FILE": {
+                        "NAME": file_name,
+                        "CONTENT": content_b64,
+                    }
+                },
+            ) as resp:
+                data = await resp.json()
+                logger.info(f"Bitrix attach_file response: {data}")
+                return "result" in data
+        except Exception:
             logger.exception(f"Bitrix attach_file error: task={task_id}, file={file_name}")
             return False
 

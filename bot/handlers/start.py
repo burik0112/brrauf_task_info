@@ -1,15 +1,16 @@
-from aiogram import Router
-from aiogram.types import Message
-from aiogram.filters import CommandStart, Command
-from aiogram.fsm.context import FSMContext
-from asgiref.sync import sync_to_async
-from django.conf import settings
 import html
 import logging
 
-from users.models import TelegramUser
-from bot.states.registration import RegistrationState
+from aiogram import Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message
+from asgiref.sync import sync_to_async
+from django.conf import settings
+
 from bot.keyboards.main_menu import get_main_menu
+from bot.states.registration import RegistrationState
+from users.models import TelegramUser
 
 router = Router()
 logger = logging.getLogger(__name__)
