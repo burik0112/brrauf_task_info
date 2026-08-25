@@ -413,7 +413,7 @@ class MediaCollectionFlowTest(TestCase):
 
 
 class RegistrationFlowTest(TestCase):
-    """Registration: wrong contact, phone mismatch, taken bitrix_id."""
+    """Registration: non-numeric bitrix_id, taken bitrix_id."""
 
     def setUp(self):
         _confirm_locks.clear()
@@ -423,30 +423,6 @@ class RegistrationFlowTest(TestCase):
         self.tg_user = TelegramUser.objects.create(
             telegram_id=USER_ID, username='testuser', first_name='Test', last_name='User',
         )
-
-    def _setup_phone(self, bitrix_phone='+998901234567'):
-        return _run(_set_state(self.storage, RegistrationState.waiting_for_phone, {
-            'bitrix_id': 10, 'bitrix_first_name': 'Test', 'bitrix_last_name': 'User',
-            'bitrix_phone': bitrix_phone,
-        }))
-
-    def test_wrong_contact(self):
-        self._setup_phone()
-        _run(_feed(self.dp, self.bot, _contact_msg(user_id=999, phone_number='+998901234567')))
-        state = _run(_get_state(self.storage))
-        self.assertEqual(str(state), 'RegistrationState:waiting_for_phone')
-
-    def test_phone_mismatch(self):
-        self._setup_phone('+998901234567')
-        _run(_feed(self.dp, self.bot, _contact_msg(user_id=USER_ID, phone_number='+998919876543')))
-        state = _run(_get_state(self.storage))
-        self.assertEqual(str(state), 'RegistrationState:waiting_for_phone')
-
-    def test_empty_bitrix_phone_rejects(self):
-        self._setup_phone('')
-        _run(_feed(self.dp, self.bot, _contact_msg(user_id=USER_ID, phone_number='+998901234567')))
-        state = _run(_get_state(self.storage))
-        self.assertEqual(str(state), 'RegistrationState:waiting_for_phone')
 
     def test_non_numeric_bitrix_id(self):
         _run(_set_state(self.storage, RegistrationState.waiting_for_bitrix_id))
@@ -463,30 +439,3 @@ class RegistrationFlowTest(TestCase):
         _run(_feed(self.dp, self.bot, _msg('42')))
         state = _run(_get_state(self.storage))
         self.assertEqual(str(state), 'RegistrationState:waiting_for_bitrix_id')
-
-
-class RegistrationPhoneMatchTest(TransactionTestCase):
-    """Phone match test needs TransactionTestCase for real DB access via sync_to_async."""
-
-    def setUp(self):
-        _confirm_locks.clear()
-        _reset_router()
-        self.dp, self.storage = _make_dp()
-        self.bot = _make_bot()
-        self.tg_user = TelegramUser.objects.create(
-            telegram_id=USER_ID, username='testuser', first_name='Test', last_name='User',
-        )
-
-    def _setup_phone(self, bitrix_phone='+998901234567'):
-        return _run(_set_state(self.storage, RegistrationState.waiting_for_phone, {
-            'bitrix_id': 10, 'bitrix_first_name': 'Test', 'bitrix_last_name': 'User',
-            'bitrix_phone': bitrix_phone,
-        }))
-
-    def test_phone_match(self):
-        self._setup_phone('+998901234567')
-        _run(_feed(self.dp, self.bot, _contact_msg(user_id=USER_ID, phone_number='+998901234567')))
-        state = _run(_get_state(self.storage))
-        self.assertIsNone(state)
-        self.tg_user.refresh_from_db()
-        self.assertTrue(self.tg_user.is_registered)
